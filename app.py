@@ -1,11 +1,12 @@
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, render_template, request, redirect, url_for, session
 import random
-import os
+import uuid
 
 app = Flask(__name__)
+app.secret_key = "your_secret_key"
 
-players = {}
-waiting_player = None
+# Хранилище активных игр
+games = {}
 
 CHOICES = {
     "rock": "🪨 Камень",
@@ -25,63 +26,84 @@ def determine_winner(choice1, choice2):
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    global waiting_player
-
     if request.method == "POST":
-        user_id = request.form["user_id"]
+        player_id = request.form.get("player_id")
+        if not player_id:
+            return "❌ Не передан player_id", 400
 
-        if not waiting_player:
-            waiting_player = user_id
-            players[user_id] = {"opponent": None, "choice": None}
-            return render_template("game.html", user_id=user_id, status="waiting")
+        # Создаём новую игру или присоединяемся к существующей
+        for game_id, game in games.items():
+            if len(game["players"]) < 2:
+                game["players"].append(player_id)
+                session["game_id"] = game_id
+                session["player_id"] = player_id
+                return redirect(url_for("game"))
 
-        opponent_id = waiting_player
-        if opponent_id == user_id:
-            return render_template("index.html", error="Подождите другого игрока.")
-
-        players[user_id] = {"opponent": opponent_id, "choice": None}
-        players[opponent_id]["opponent"] = user_id
-        waiting_player = None
-
-        return render_template("game.html", user_id=user_id, status="ready")
+        # Создать новую игру
+        game_id = str(uuid.uuid4())
+        games[game_id] = {
+            "players": [player_id],
+            "moves": {}
+        }
+        session["game_id"] = game_id
+        session["player_id"] = player_id
+        return redirect(url_for("game"))
 
     return render_template("index.html")
 
-@app.route("/play", methods=["POST"])
-def play():
-    user_id = request.form["user_id"]
-    choice = request.form["choice"]
+@app.route("/game", methods=["GET", "POST"])
+def game():
+    game_id = session.get("game_id")
+    player_id = session.get("player_id")
 
-    players[user_id]["choice"] = choice
-    opponent_id = players[user_id]["opponent"]
+    if not game_id or not player_id or game_id not in games:
+        return redirect(url_for("index"))
 
-    if not players[opponent_id]["choice"]:
-        return render_template("game.html", user_id=user_id, status="waiting_choice")
+    game = games[game_id]
 
-    user_choice = players[user_id]["choice"]
-    opponent_choice = players[opponent_id]["choice"]
+    if request.method == "POST":
+        move = request.form.get("move")
+        if move not in CHOICES:
+            return "❌ Неверный ход", 400
+        game["moves"][player_id] = move
 
-    result = determine_winner(user_choice, opponent_choice)
-    result_text = ""
+        # Если оба игрока сходили — показываем результат
+        if len(game["moves"]) == 2:
+            return redirect(url_for("result"))
 
-    if result == 0:
+    opponent_connected = len(game["players"]) == 2
+    already_moved = player_id in game["moves"]
+    return render_template("game.html", choices=CHOICES, opponent_connected=opponent_connected, already_moved=already_moved)
+
+@app.route("/result")
+def result():
+    game_id = session.get("game_id")
+    player_id = session.get("player_id")
+
+    if not game_id or not player_id or game_id not in games:
+        return redirect(url_for("index"))
+
+    game = games[game_id]
+    if len(game["players"]) < 2 or len(game["moves"]) < 2:
+        return redirect(url_for("game"))
+
+    p1, p2 = game["players"]
+    move1 = game["moves"][p1]
+    move2 = game["moves"][p2]
+    winner = determine_winner(move1, move2)
+
+    if winner == 0:
         result_text = "🤝 Ничья!"
-    elif (result == 1 and players[user_id]["opponent"] == opponent_id) or (result == 2 and players[user_id]["opponent"] != opponent_id):
+    elif (winner == 1 and player_id == p1) or (winner == 2 and player_id == p2):
         result_text = "🏆 Вы победили!"
     else:
-        result_text = "💥 Вы проиграли!"
+        result_text = "💀 Вы проиграли."
 
-    choice_text = f"""
-    <b>Ваш выбор:</b> {CHOICES[user_choice]}<br>
-    <b>Выбор соперника:</b> {CHOICES[opponent_choice]}<br><br>
-    <b>{result_text}</b>
-    """
+    # Очистить игру
+    del games[game_id]
 
-    del players[user_id]
-    del players[opponent_id]
-
-    return render_template("result.html", result=choice_text)
+    return render_template("result.html", result=result_text, move1=CHOICES[move1], move2=CHOICES[move2])
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True)
+
